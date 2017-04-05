@@ -58,7 +58,7 @@ int dm510_init_module( void ) {
 
 	/* initialization code belongs here */
 
-	devs = kmalloc(2 * sizeof(struct dm510_dev), GFP_KERNEL);
+	devs = (struct dm510_dev*)kmalloc(2 * sizeof(struct dm510_dev), GFP_KERNEL);
 
 	/* kmalloc buffers */
 
@@ -66,6 +66,10 @@ int dm510_init_module( void ) {
 	printk("devno: %d\n", devno);
 
 	printk("%d\n", register_chrdev_region(devno, 1, "dm510-0"));
+
+	devs[0].m = (char *)kmalloc(4, GFP_KERNEL);
+	memcpy(devs[0].m, "hej ", 4);
+	devs[0].size = 4;
 
 	cdev_init(&devs[0].cdev, &dm510_fops);
 	devs[0].cdev.owner = THIS_MODULE;
@@ -77,6 +81,10 @@ int dm510_init_module( void ) {
 	printk("devno: %d\n", devno);
 
 	printk("%d\n", register_chrdev_region(devno, 1, "dm510-1"));
+
+	devs[1].m = (char *)kmalloc(5, GFP_KERNEL);
+	memcpy(devs[1].m, "kage ", 5);
+	devs[1].size = 5;
 
 	cdev_init(&devs[1].cdev, &dm510_fops);
 	devs[1].cdev.owner = THIS_MODULE;
@@ -109,20 +117,7 @@ static int dm510_open( struct inode *inode, struct file *filp ) {
 	dev = container_of(inode->i_cdev, struct dm510_dev, cdev);
 	filp->private_data = dev;
 
-	int minor = MINOR(dev->cdev.dev);
-
-	if (minor == MIN_MINOR_NUMBER)
-	{
-		dev->m = (char *)kmalloc(4, GFP_KERNEL);
-		memcpy(dev->m, "hej ", 4);
-		dev->size = 4;
-	}
-	else if(minor == MAX_MINOR_NUMBER)
-	{
-		dev->m = (char *)kmalloc(5, GFP_KERNEL);
-		memcpy(dev->m, "kage ", 5);
-		dev->size = 5;
-	}
+	//int minor = MINOR(dev->cdev.dev);
 
 
 	return 0;
