@@ -36,10 +36,20 @@ long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 /* end of what really should have been in a .h file */
 
 struct dm510_dev {
-	char *m;
+	struct dm510_buffer* read_buffer;
+	struct dm510_buffer* write_buffer;
 	int size;
 	struct cdev cdev;
 };
+
+struct dm510_buffer {
+	char *buffer;
+	int index;
+	int size;
+};
+
+struct dm510_buffer* buffer1;
+struct dm510_buffer* buffer2;
 
 struct dm510_dev *devs;
 
@@ -56,6 +66,19 @@ static struct file_operations dm510_fops = {
 /* called when module is loaded */
 int dm510_init_module( void ) {
 
+	// TODO make function... setup_buffers()
+	buffer1 = (struct dm510_buffer *) kmalloc(sizeof(struct dm510_buffer), GFP_KERNEL);
+	buffer2 = (struct dm510_buffer *) kmalloc(sizeof(struct dm510_buffer), GFP_KERNEL);
+
+	buffer1->buffer = (char *) kmalloc(sizeof(char) * 100, GFP_KERNEL);
+	buffer2->buffer = (char *) kmalloc(sizeof(char) * 100, GFP_KERNEL);
+
+	buffer1->size = 100;
+	buffer2->size = 100;
+
+	buffer1->index = 0;
+	buffer2->index = 0;
+
 	/* initialization code belongs here */
 
 	devs = (struct dm510_dev*)kmalloc(2 * sizeof(struct dm510_dev), GFP_KERNEL);
@@ -67,9 +90,8 @@ int dm510_init_module( void ) {
 
 	printk("%d\n", register_chrdev_region(devno, 1, "dm510-0"));
 
-	devs[0].m = (char *)kmalloc(4, GFP_KERNEL);
-	memcpy(devs[0].m, "hej ", 4);
-	devs[0].size = 4;
+	devs[0].read_buffer = buffer1;
+	devs[0].write_buffer = buffer2;
 
 	cdev_init(&devs[0].cdev, &dm510_fops);
 	devs[0].cdev.owner = THIS_MODULE;
@@ -82,9 +104,8 @@ int dm510_init_module( void ) {
 
 	printk("%d\n", register_chrdev_region(devno, 1, "dm510-1"));
 
-	devs[1].m = (char *)kmalloc(5, GFP_KERNEL);
-	memcpy(devs[1].m, "kage ", 5);
-	devs[1].size = 5;
+	devs[1].read_buffer = buffer2;
+	devs[1].write_buffer = buffer1;
 
 	cdev_init(&devs[1].cdev, &dm510_fops);
 	devs[1].cdev.owner = THIS_MODULE;
@@ -100,6 +121,18 @@ int dm510_init_module( void ) {
 void dm510_cleanup_module( void ) {
 
 	/* kfree buffers */
+	kfree(buffer1->buffer);
+	kfree(buffer2->buffer);
+
+	kfree(buffer1);
+	kfree(buffer2);
+
+
+	unregister_chrdev_region(devs[0].cdev.dev, 1);
+	cdev_del(&devs[0].cdev);
+
+	unregister_chrdev_region(devs[1].cdev.dev, 1);
+	cdev_del(&devs[1].cdev);
 
 	/* clean up code belongs here */
 
@@ -129,9 +162,9 @@ static int dm510_release( struct inode *inode, struct file *filp ) {
 
 	/* device release code belongs here */
 
+
 	return 0;
 }
-
 
 /* Called when a process, which already opened the dev file, attempts to read from it. */
 static ssize_t dm510_read( struct file *filp,
@@ -139,24 +172,24 @@ static ssize_t dm510_read( struct file *filp,
     size_t count,   /* The max number of bytes to read  */
     loff_t *f_pos )  /* The offset in the file           */
 {
-	int c = count;
-	int index = 0;
 
 	struct dm510_dev *dev = filp->private_data;
 	printk(KERN_INFO "dev0 %p, cdev %p\n", dev, &dev->cdev);
-	//printk(KERN_INFO "Message is \"%s\" with length %d\n", dev->m, dev->size);
+	//printk(KERN_INFO "Message is \"%s\" with length %d\n", dev->read_buffer, dev->size);
 
-	while (c >= dev->size)
-	{
-		copy_to_user(buf + index, dev->m, dev->size);
+	int max_read = min(count, dev->read_buffer->index);
 
-		index += dev->size;
-		c -= dev->size;
-	}
-	copy_to_user(buf + index, dev->m, c);
+	copy_to_user(buf, dev->read_buffer->buffer, max_read);
 
-	f_pos += count;
-	return count; //return number of bytes read
+	char * new_buffer = kmalloc(sizeof(char) * dev->read_buffer->size, GFP_KERNEL);
+
+	memcpy(new_buffer, dev->read_buffer->buffer + max_read, dev->read_buffer->size - max_read);
+
+	dev->read_buffer->buffer = new_buffer;
+	dev->read_buffer->index -= max_read;
+
+	*f_pos += max_read;
+	return max_read; //return number of bytes read
 }
 
 
@@ -166,22 +199,21 @@ static ssize_t dm510_write( struct file *filp,
     size_t count,   /* The max number of bytes to write */
     loff_t *f_pos )  /* The offset in the file           */
 {
+
 	struct dm510_dev *dev = filp->private_data;
 
-	kfree(dev->m);
+	// Check that we have enough space in the buffer
+	if (dev->write_buffer->size - dev->write_buffer->index < count)
+	{
+		// TODO: proper error code
+		return -1;
+	}
 
-	dev->m = (char *)kmalloc(count * sizeof(char), GFP_KERNEL);
-	dev->size = count;
-
-	copy_from_user(dev->m, buf, count);
-
-	dev->m[dev->size - 1] = 0;
+	copy_from_user(dev->write_buffer->buffer + dev->write_buffer->index, buf, count);
 
 	*f_pos += count;
 
-	printk(KERN_INFO "Message is \"%s\" with length %d\n", dev->m, dev->size);
-	//printk(KERN_INFO "dev0 %p, cdev %p\n", dev, &dev->cdev);
-	//printk(KERN_INFO "dev0 %p, cdev %p\n", (struct dm510_dev*)filp->private_data, &((struct dm510_dev*)filp->private_data)->cdev);
+	dev->write_buffer->index += count;
 
 	return count; //return number of bytes written
 }
