@@ -83,10 +83,14 @@ static struct file_operations dm510_fops = {
     .unlocked_ioctl   = dm510_ioctl
 };
 
-/* called when module is loaded */
-int dm510_init_module( void ) {
+void free_buffers(void)
+{
+	kfree(buffer1->buffer);
+	kfree(buffer2->buffer);
+}
 
-	// TODO make function... setup_buffers()
+void setup_buffers(void)
+{
 	buffer1 = (struct dm510_buffer *) kmalloc(sizeof(struct dm510_buffer), GFP_KERNEL);
 	buffer1->buffer = (char *) kmalloc(sizeof(char) * BUFFER_SIZE, GFP_KERNEL);
 	buffer1->size = BUFFER_SIZE;
@@ -102,7 +106,12 @@ int dm510_init_module( void ) {
 	init_MUTEX(&buffer2->sem);
 	init_waitqueue_head(&buffer2->read_wait_queue);
 	init_waitqueue_head(&buffer2->write_wait_queue);
+}
 
+/* called when module is loaded */
+int dm510_init_module( void ) {
+
+	setup_buffers();
 	/* initialization code belongs here */
 
 	devs = (struct dm510_dev*)kmalloc(2 * sizeof(struct dm510_dev), GFP_KERNEL);
@@ -113,6 +122,7 @@ int dm510_init_module( void ) {
 	//printk("devno: %d\n", devno);
 
 	printk("%d\n", register_chrdev_region(devno, 1, "dm510-0"));
+
 
 	devs[0].read_buffer = buffer1;
 	devs[0].write_buffer = buffer2;
@@ -125,7 +135,7 @@ int dm510_init_module( void ) {
 	devno = MKDEV(MAJOR_NUMBER, MAX_MINOR_NUMBER);
 	//printk("devno: %d\n", devno);
 
-	printk("%d\n", register_chrdev_region(devno, 1, "dm510-1"));
+	printk("%d\n", register_chrdev_region(devno, 1, "dm510-1")); //TODO: is this registerd right??? check scull
 
 	devs[1].read_buffer = buffer2;
 	devs[1].write_buffer = buffer1;
@@ -144,8 +154,7 @@ int dm510_init_module( void ) {
 void dm510_cleanup_module( void ) {
 
 	/* kfree buffers */
-	kfree(buffer1->buffer);
-	kfree(buffer2->buffer);
+	free_buffers();
 
 	kfree(buffer1);
 	kfree(buffer2);
@@ -163,15 +172,12 @@ void dm510_cleanup_module( void ) {
 	printk(KERN_ALERT "DM510: Module unloaded.\n");
 }
 
-
-/* Called when a process tries to open the device file */
-static int dm510_open( struct inode *inode, struct file *filp ) {
-
-	/* device claiming code belongs here */
+// is leaving must be called with 1 or -1 TODO: fix this function or don't use it (in the case of decrementing)
+int set_readers_and_writers(struct inode *inode, struct file *filp, int is_leaving)
+{
 	struct dm510_dev *dev;
 	dev = container_of(inode->i_cdev, struct dm510_dev, cdev);
 	filp->private_data = dev;
-
 
 	if (filp->f_mode & O_RDWR)
 	{
@@ -189,8 +195,8 @@ static int dm510_open( struct inode *inode, struct file *filp ) {
 
 		if (dev->read_buffer->no_readers < NO_READERS && dev->write_buffer->no_writers < NO_WRITERS)
 		{
-			dev->read_buffer->no_readers++;
-			dev->write_buffer->no_writers++;
+			dev->read_buffer->no_readers += is_leaving;
+			dev->write_buffer->no_writers += is_leaving;
 		}
 
 		up(&dev->read_buffer->sem);
@@ -208,7 +214,7 @@ static int dm510_open( struct inode *inode, struct file *filp ) {
 
 		if (dev->read_buffer->no_readers < NO_READERS)
 		{
-			dev->read_buffer->no_readers++;
+			dev->read_buffer->no_readers += is_leaving;
 			up(&dev->read_buffer->sem);
 		}
 		else
@@ -227,7 +233,7 @@ static int dm510_open( struct inode *inode, struct file *filp ) {
 		}
 		if (dev->write_buffer->no_writers < NO_WRITERS)
 		{
-			dev->write_buffer->no_writers++;
+			dev->write_buffer->no_writers += is_leaving;
 			up(&dev->write_buffer->sem);
 		}
 		else
@@ -241,14 +247,17 @@ static int dm510_open( struct inode *inode, struct file *filp ) {
 	return 0;
 }
 
+/* Called when a process tries to open the device file */
+static int dm510_open( struct inode *inode, struct file *filp )
+{
+	return set_readers_and_writers(inode, filp, 1);
+}
+
 
 /* Called when a process closes the device file. */
-static int dm510_release( struct inode *inode, struct file *filp ) {
-
-	/* device release code belongs here */
-
-
-	return 0;
+static int dm510_release( struct inode *inode, struct file *filp )
+{
+	return set_readers_and_writers(inode, filp, -1);
 }
 
 /* Called when a process, which already opened the dev file, attempts to read from it. */
@@ -376,6 +385,8 @@ long dm510_ioctl(
 	{
 		case DM510_IOCBUFSIZE:
 			BUFFER_SIZE = arg;
+			free_buffers();
+			setup_buffers();
 			break;
 		case DM510_IOCNOREADERS:
 			NO_READERS = arg;

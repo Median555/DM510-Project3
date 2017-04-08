@@ -7,18 +7,17 @@
 
 
 
-#define DM510_IOC_MAGIC 'p'
-#define DM510_IOC_MAXNO 2
-#define DM510_IOCBUFSIZE _IO(DM510_IOC_MAGIC,  1)
-#define DM510_IOCNOREADERS _IO(DM510_IOC_MAGIC,  2)
 
+//#define DM510_IOCBUFSIZE _IO(DM510_IOC_MAGIC,  1) // == 28673
+//#define DM510_IOCNOREADERS _IO(DM510_IOC_MAGIC,  2) // == 286740
 
 int main(int argc, char *argv[])
 {
 	int fd = open("/dev/dm510-0", O_RDWR);
 	int buffer_size = 5000;
-	ioctl(fd, DM510_IOCBUFSIZE, buffer_size);
+	//ioctl(fd, 28673, buffer_size);
+	printf("set buffer size result: %d\n", ioctl(fd, 28673, buffer_size));
 	int no_readers = 10;
-	ioctl(fd, DM510_IOCNOREADERS, no_readers);
+	printf("set readers result: %d\n", ioctl(fd, 28674, no_readers));
 	return 0;
 }
