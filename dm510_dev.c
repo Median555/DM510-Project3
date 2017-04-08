@@ -23,7 +23,13 @@
 
 #include <linux/sched.h>
 
-#define init_MUTEX(LOCKNAME) sema_init(LOCKNAME,1); // From scull_pipe
+
+#define DM510_IOC_MAGIC 'p'
+#define DM510_IOC_MAXNO 2
+#define DM510_IOCBUFSIZE _IO(DM510_IOC_MAGIC,  1)
+#define DM510_IOCNOREADERS _IO(DM510_IOC_MAGIC,  2)
+
+#define init_MUTEX(LOCKNAME) sema_init(LOCKNAME,1) // From scull_pipe
 
 /* Prototypes - this would normally go in a .h file */
 static int dm510_open( struct inode*, struct file* );
@@ -54,6 +60,8 @@ struct dm510_buffer {
 	struct semaphore sem;
 	wait_queue_head_t read_wait_queue;
 	wait_queue_head_t write_wait_queue;
+	int no_readers;
+	int no_writers;
 };
 
 struct dm510_buffer* buffer1;
@@ -61,7 +69,9 @@ struct dm510_buffer* buffer2;
 
 struct dm510_dev *devs;
 
-int buffer_size = 100;
+int BUFFER_SIZE = 100;
+int NO_READERS = 10;
+int NO_WRITERS = 1;
 
 /* file operations struct */
 static struct file_operations dm510_fops = {
@@ -78,16 +88,16 @@ int dm510_init_module( void ) {
 
 	// TODO make function... setup_buffers()
 	buffer1 = (struct dm510_buffer *) kmalloc(sizeof(struct dm510_buffer), GFP_KERNEL);
-	buffer1->buffer = (char *) kmalloc(sizeof(char) * buffer_size, GFP_KERNEL);
-	buffer1->size = buffer_size;
+	buffer1->buffer = (char *) kmalloc(sizeof(char) * BUFFER_SIZE, GFP_KERNEL);
+	buffer1->size = BUFFER_SIZE;
 	buffer1->index = 0;
 	init_MUTEX(&buffer1->sem);
 	init_waitqueue_head(&buffer1->read_wait_queue);
 	init_waitqueue_head(&buffer1->write_wait_queue);
 
 	buffer2 = (struct dm510_buffer *) kmalloc(sizeof(struct dm510_buffer), GFP_KERNEL);
-	buffer2->buffer = (char *) kmalloc(sizeof(char) * buffer_size, GFP_KERNEL);
-	buffer2->size = buffer_size;
+	buffer2->buffer = (char *) kmalloc(sizeof(char) * BUFFER_SIZE, GFP_KERNEL);
+	buffer2->size = BUFFER_SIZE;
 	buffer2->index = 0;
 	init_MUTEX(&buffer2->sem);
 	init_waitqueue_head(&buffer2->read_wait_queue);
@@ -162,7 +172,71 @@ static int dm510_open( struct inode *inode, struct file *filp ) {
 	dev = container_of(inode->i_cdev, struct dm510_dev, cdev);
 	filp->private_data = dev;
 
-	//int minor = MINOR(dev->cdev.dev);
+
+	if (filp->f_mode & O_RDWR)
+	{
+		printk(KERN_ALERT "Opened for both reading and writing\n");
+		if (down_interruptible(&dev->read_buffer->sem))
+		{
+			return -ERESTARTSYS;
+		}
+
+		if (down_interruptible(&dev->write_buffer->sem))
+		{
+			up(&dev->read_buffer->sem);
+			return -ERESTARTSYS;
+		}
+
+		if (dev->read_buffer->no_readers < NO_READERS && dev->write_buffer->no_writers < NO_WRITERS)
+		{
+			dev->read_buffer->no_readers++;
+			dev->write_buffer->no_writers++;
+		}
+
+		up(&dev->read_buffer->sem);
+		up(&dev->write_buffer->sem);
+
+
+	}
+	else if (filp->f_mode & FMODE_READ)
+	{
+		printk(KERN_ALERT "Opened for reading\n");
+		if (down_interruptible(&dev->read_buffer->sem))
+		{
+			return -ERESTARTSYS;
+		}
+
+		if (dev->read_buffer->no_readers < NO_READERS)
+		{
+			dev->read_buffer->no_readers++;
+			up(&dev->read_buffer->sem);
+		}
+		else
+		{
+			up(&dev->read_buffer->sem);
+			// TODO: check errorcode
+			return -1;
+		}
+	}
+	else if (filp->f_mode & FMODE_WRITE)
+	{
+		printk(KERN_ALERT "Opened for writing\n");
+		if (down_interruptible(&dev->write_buffer->sem))
+		{
+			return -ERESTARTSYS;
+		}
+		if (dev->write_buffer->no_writers < NO_WRITERS)
+		{
+			dev->write_buffer->no_writers++;
+			up(&dev->write_buffer->sem);
+		}
+		else
+		{
+			up(&dev->write_buffer->sem);
+			// TODO: check errorcode
+			return -1;
+		}
+	}
 
 	return 0;
 }
@@ -188,7 +262,6 @@ static ssize_t dm510_read( struct file *filp,
 		return -1; //TODO
 	}
 
-	int read = 0;
 	struct dm510_dev *dev = filp->private_data;
 
 	if (down_interruptible(&dev->read_buffer->sem))
@@ -216,7 +289,7 @@ static ssize_t dm510_read( struct file *filp,
 		}
 	}
 
-	int max_read = min(count - read, dev->read_buffer->index);
+	int max_read = min(count, dev->read_buffer->index);
 
 	char *new_buffer = kmalloc(sizeof(char) * dev->read_buffer->size, GFP_KERNEL);
 	memcpy(new_buffer, dev->read_buffer->buffer + max_read, dev->read_buffer->size - max_read);
@@ -229,12 +302,12 @@ static ssize_t dm510_read( struct file *filp,
 	wake_up_interruptible(&dev->read_buffer->write_wait_queue);
 
 	//TODO error checking
-	copy_to_user(buf, old_buffer, max_read);
+
+	int copy_res = copy_to_user(buf, old_buffer, max_read);
+
 	kfree(old_buffer);
 
-	read += max_read;
-
-	return read; //return number of bytes read
+	return max_read - copy_res; //return number of bytes read
 }
 
 
@@ -244,11 +317,9 @@ static ssize_t dm510_write( struct file *filp,
     size_t count,   /* The max number of bytes to write */
     loff_t *f_pos )  /* The offset in the file           */
 {
-	int written = 0;
 
 	struct dm510_dev *dev = filp->private_data;
 
-	//printk(KERN_ALERT "trying to get the lock at line 264\n");
 	if (down_interruptible(&dev->write_buffer->sem))
 	{
 		return -ERESTARTSYS;
@@ -271,7 +342,6 @@ static ssize_t dm510_write( struct file *filp,
 			return -ERESTARTSYS; // Restart the system call TODO sure?
 		}
 
-		//printk(KERN_ALERT "trying to get the lock at line 294\n");
 		if (down_interruptible(&dev->write_buffer->sem))
 		{
 			return -ERESTARTSYS;
@@ -282,19 +352,14 @@ static ssize_t dm510_write( struct file *filp,
 
 	int copy_res = copy_from_user(dev->write_buffer->buffer + dev->write_buffer->index, buf, max_write);
 
-	if (copy_res != 0)
-	{
-		printk(KERN_ALERT "there was an error: %d", copy_res);
-	}
 
 	// copy_res is the number of chars not copied to user
 	dev->write_buffer->index += max_write - copy_res;
-	written += max_write - copy_res;
 
 	up(&dev->write_buffer->sem); // Release the lock
 	wake_up_interruptible(&dev->write_buffer->read_wait_queue);
 
-	return written; //return number of bytes written
+	return max_write - copy_res; //return number of bytes written
 }
 
 /* called by system call icotl */
@@ -303,10 +368,23 @@ long dm510_ioctl(
     unsigned int cmd,   /* command passed from the user */
     unsigned long arg ) /* argument of the command */
 {
-	/* ioctl code belongs here */
-	//printk(KERN_ALERT "DM510: ioctl called.\n");
 
-	return 0; //has to be changed
+	if (_IOC_TYPE(cmd) != DM510_IOC_MAGIC) return -ENOTTY;
+	if (_IOC_NR(cmd) > DM510_IOC_MAXNO) return -ENOTTY;
+
+	switch(cmd)
+	{
+		case DM510_IOCBUFSIZE:
+			BUFFER_SIZE = arg;
+			break;
+		case DM510_IOCNOREADERS:
+			NO_READERS = arg;
+			break;
+		default:
+	  		return -ENOTTY;
+	}
+
+	return 0;
 }
 
 module_init( dm510_init_module );
