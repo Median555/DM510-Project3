@@ -19,6 +19,11 @@
 #include <linux/cdev.h>
 /* #include <asm/system.h> */
 #include <asm/switch_to.h>
+#include <linux/wait.h>
+
+#include <linux/sched.h>
+
+#define init_MUTEX(LOCKNAME) sema_init(LOCKNAME,1); // From scull_pipe
 
 /* Prototypes - this would normally go in a .h file */
 static int dm510_open( struct inode*, struct file* );
@@ -46,12 +51,17 @@ struct dm510_buffer {
 	char *buffer;
 	int index;
 	int size;
+	struct semaphore sem;
+	wait_queue_head_t read_wait_queue;
+	wait_queue_head_t write_wait_queue;
 };
 
 struct dm510_buffer* buffer1;
 struct dm510_buffer* buffer2;
 
 struct dm510_dev *devs;
+
+int buffer_size = 100;
 
 /* file operations struct */
 static struct file_operations dm510_fops = {
@@ -68,16 +78,20 @@ int dm510_init_module( void ) {
 
 	// TODO make function... setup_buffers()
 	buffer1 = (struct dm510_buffer *) kmalloc(sizeof(struct dm510_buffer), GFP_KERNEL);
-	buffer2 = (struct dm510_buffer *) kmalloc(sizeof(struct dm510_buffer), GFP_KERNEL);
-
-	buffer1->buffer = (char *) kmalloc(sizeof(char) * 100, GFP_KERNEL);
-	buffer2->buffer = (char *) kmalloc(sizeof(char) * 100, GFP_KERNEL);
-
-	buffer1->size = 100;
-	buffer2->size = 100;
-
+	buffer1->buffer = (char *) kmalloc(sizeof(char) * buffer_size, GFP_KERNEL);
+	buffer1->size = buffer_size;
 	buffer1->index = 0;
+	init_MUTEX(&buffer1->sem);
+	init_waitqueue_head(&buffer1->read_wait_queue);
+	init_waitqueue_head(&buffer1->write_wait_queue);
+
+	buffer2 = (struct dm510_buffer *) kmalloc(sizeof(struct dm510_buffer), GFP_KERNEL);
+	buffer2->buffer = (char *) kmalloc(sizeof(char) * buffer_size, GFP_KERNEL);
+	buffer2->size = buffer_size;
 	buffer2->index = 0;
+	init_MUTEX(&buffer2->sem);
+	init_waitqueue_head(&buffer2->read_wait_queue);
+	init_waitqueue_head(&buffer2->write_wait_queue);
 
 	/* initialization code belongs here */
 
@@ -86,7 +100,7 @@ int dm510_init_module( void ) {
 	/* kmalloc buffers */
 
 	int devno = MKDEV(MAJOR_NUMBER, MIN_MINOR_NUMBER);
-	printk("devno: %d\n", devno);
+	//printk("devno: %d\n", devno);
 
 	printk("%d\n", register_chrdev_region(devno, 1, "dm510-0"));
 
@@ -98,9 +112,8 @@ int dm510_init_module( void ) {
 	devs[0].cdev.ops = &dm510_fops;
 	cdev_add(&devs[0].cdev, devno, 1); //TODO: error checking
 
-
 	devno = MKDEV(MAJOR_NUMBER, MAX_MINOR_NUMBER);
-	printk("devno: %d\n", devno);
+	//printk("devno: %d\n", devno);
 
 	printk("%d\n", register_chrdev_region(devno, 1, "dm510-1"));
 
@@ -127,7 +140,6 @@ void dm510_cleanup_module( void ) {
 	kfree(buffer1);
 	kfree(buffer2);
 
-
 	unregister_chrdev_region(devs[0].cdev.dev, 1);
 	cdev_del(&devs[0].cdev);
 
@@ -152,7 +164,6 @@ static int dm510_open( struct inode *inode, struct file *filp ) {
 
 	//int minor = MINOR(dev->cdev.dev);
 
-
 	return 0;
 }
 
@@ -173,22 +184,67 @@ static ssize_t dm510_read( struct file *filp,
     loff_t *f_pos )  /* The offset in the file           */
 {
 
+	//printk(KERN_INFO "now reading \n");
+
 	struct dm510_dev *dev = filp->private_data;
-	printk(KERN_INFO "dev0 %p, cdev %p\n", dev, &dev->cdev);
+	//printk(KERN_INFO "dev0 %p, cdev %p\n", dev, &dev->cdev);
 	//printk(KERN_INFO "Message is \"%s\" with length %d\n", dev->read_buffer, dev->size);
+
+	char *old_buffer;
+
+	if (down_interruptible(&dev->read_buffer->sem))
+	{
+		return -ERESTARTSYS;
+	}
 
 	int max_read = min(count, dev->read_buffer->index);
 
-	copy_to_user(buf, dev->read_buffer->buffer, max_read);
+	while (dev->read_buffer->index == 0) // Buffer is empty
+	{
+		//printk(KERN_INFO "queue not empty \n");
+		up(&dev->read_buffer->sem); // Release the lock
+		//printk(KERN_INFO "Released the lock \n");
+		if (filp->f_flags & O_NONBLOCK)
+		{
+			return -EAGAIN;
+		}
+
+		//printk(KERN_INFO "wait_event_interruptible is being called \n");
+		//printk(KERN_INFO "index is %d \n", dev->read_buffer->index);
+
+		if (wait_event_interruptible(dev->read_buffer->read_wait_queue, (dev->read_buffer->index > 0)))
+		{
+			printk(KERN_INFO "Bad stuff\n");
+			return -ERESTARTSYS; // Restart the system call
+		}
+
+		//printk(KERN_INFO "index is %d \n", dev->read_buffer->index);
+
+		//printk(KERN_INFO "Getting the lock \n");
+		if (down_interruptible(&dev->read_buffer->sem))
+		{
+			return -ERESTARTSYS;
+		}
+
+		//printk(KERN_INFO "while loop to repeat \n");
+	}
 
 	char * new_buffer = kmalloc(sizeof(char) * dev->read_buffer->size, GFP_KERNEL);
-
 	memcpy(new_buffer, dev->read_buffer->buffer + max_read, dev->read_buffer->size - max_read);
-
+	old_buffer = dev->read_buffer->buffer;
 	dev->read_buffer->buffer = new_buffer;
 	dev->read_buffer->index -= max_read;
+	up(&dev->read_buffer->sem);
+
+	wake_up_interruptible(&dev->read_buffer->write_wait_queue);
+
+	copy_to_user(buf, old_buffer, max_read);
+	kfree(old_buffer);
+
+
 
 	*f_pos += max_read;
+
 	return max_read; //return number of bytes read
 }
 
@@ -199,23 +255,89 @@ static ssize_t dm510_write( struct file *filp,
     size_t count,   /* The max number of bytes to write */
     loff_t *f_pos )  /* The offset in the file           */
 {
+	int written = 0;
+
+	printk(KERN_INFO " -> now writing \n");
 
 	struct dm510_dev *dev = filp->private_data;
 
-	// Check that we have enough space in the buffer
-	if (dev->write_buffer->size - dev->write_buffer->index < count)
+	printk(KERN_INFO " -> now getting the lock \n");
+	if (down_interruptible(&dev->write_buffer->sem))
 	{
-		// TODO: proper error code
-		return -1;
+		return -ERESTARTSYS;
 	}
 
-	copy_from_user(dev->write_buffer->buffer + dev->write_buffer->index, buf, count);
+	printk(KERN_INFO " -> got ze lock \n");
 
-	*f_pos += count;
+	while (dev->write_buffer->index == dev->write_buffer->size || count > written) // Buffer is full
+	{
+		printk(KERN_INFO "buffer is full or count less than written\n");
 
-	dev->write_buffer->index += count;
+		if (filp->f_flags & O_NONBLOCK)
+		{
+			printk(KERN_INFO "Released the lock \n");
+			up(&dev->write_buffer->sem); // Release the lock
+			return -EAGAIN;
+		}
 
-	return count; //return number of bytes written
+		printk(KERN_INFO "wait_event_interruptible is being called \n");
+		printk(KERN_INFO "index is %d \n", dev->write_buffer->index);
+
+		if (!(dev->write_buffer->index < dev->write_buffer->size))
+		{
+			up(&dev->write_buffer->sem); // Release the lock
+			if (wait_event_interruptible(dev->write_buffer->write_wait_queue, (dev->write_buffer->index < dev->write_buffer->size)))
+			{
+				printk(KERN_INFO "Bad stuff\n");
+				return -ERESTARTSYS; // Restart the system call
+			}
+		}
+		else
+		{
+			up(&dev->write_buffer->sem); // Release the lock
+		}
+
+		printk(KERN_INFO "index is %d \n", dev->write_buffer->index);
+
+		printk(KERN_INFO "Getting the lock \n");
+
+
+		if (down_interruptible(&dev->write_buffer->sem))
+		{
+			return -ERESTARTSYS;
+		}
+
+		printk(KERN_INFO "lock aquried \n");
+
+		int max_write = min(count, dev->write_buffer->size - dev->write_buffer->index);
+
+		int copy_res = copy_from_user(dev->write_buffer->buffer + dev->write_buffer->index, buf, max_write);
+
+		if (copy_res != 0)
+		{
+			printk(KERN_INFO "there was an error: %d", copy_res);
+		}
+
+		printk(KERN_INFO "max_write is: %d \n", max_write);
+
+		dev->write_buffer->index += max_write - copy_res;
+		written += max_write - copy_res;
+
+		printk(KERN_INFO "written: %d\n", written);
+
+
+		wake_up_interruptible(&dev->write_buffer->read_wait_queue);
+
+		printk(KERN_INFO "while loop to repeat \n");
+	}
+
+	printk(KERN_INFO "about to release the lock! \n");
+	up(&dev->write_buffer->sem); // Release the lock
+	printk(KERN_INFO "released the lock \n");
+
+	printk(KERN_INFO "done writing! \n");
+
+	return written; //return number of bytes written
 }
 
 /* called by system call icotl */
@@ -225,7 +347,7 @@ long dm510_ioctl(
     unsigned long arg ) /* argument of the command */
 {
 	/* ioctl code belongs here */
-	printk(KERN_INFO "DM510: ioctl called.\n");
+	//printk(KERN_INFO "DM510: ioctl called.\n");
 
 	return 0; //has to be changed
 }
