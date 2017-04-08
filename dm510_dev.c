@@ -191,51 +191,48 @@ static ssize_t dm510_read( struct file *filp,
 	int read = 0;
 	struct dm510_dev *dev = filp->private_data;
 
-	while (read < count)
+	if (down_interruptible(&dev->read_buffer->sem))
 	{
+		return -ERESTARTSYS;
+	}
+
+	while (dev->read_buffer->index == 0) // Buffer is empty
+	{
+		up(&dev->read_buffer->sem); // Release the lock
+		if (filp->f_flags & O_NONBLOCK)
+		{
+			return -EAGAIN;
+		}
+
+		if (wait_event_interruptible(dev->read_buffer->read_wait_queue, (dev->read_buffer->index > 0)))
+		{
+			printk(KERN_ALERT "Bad stuff\n");
+			return -ERESTARTSYS; // Restart the system call
+		}
+
 		if (down_interruptible(&dev->read_buffer->sem))
 		{
 			return -ERESTARTSYS;
 		}
-
-		while (dev->read_buffer->index == 0) // Buffer is empty
-		{
-			up(&dev->read_buffer->sem); // Release the lock
-			if (filp->f_flags & O_NONBLOCK)
-			{
-				return -EAGAIN;
-			}
-
-			if (wait_event_interruptible(dev->read_buffer->read_wait_queue, (dev->read_buffer->index > 0)))
-			{
-				printk(KERN_ALERT "Bad stuff\n");
-				return -ERESTARTSYS; // Restart the system call
-			}
-
-			if (down_interruptible(&dev->read_buffer->sem))
-			{
-				return -ERESTARTSYS;
-			}
-		}
-
-		int max_read = min(count - read, dev->read_buffer->index);
-
-		char *new_buffer = kmalloc(sizeof(char) * dev->read_buffer->size, GFP_KERNEL);
-		memcpy(new_buffer, dev->read_buffer->buffer + max_read, dev->read_buffer->size - max_read);
-
-		char *old_buffer = dev->read_buffer->buffer;
-		dev->read_buffer->buffer = new_buffer;
-		dev->read_buffer->index -= max_read;
-
-		up(&dev->read_buffer->sem);
-		wake_up_interruptible(&dev->read_buffer->write_wait_queue);
-
-		//TODO error checking
-		copy_to_user(buf, old_buffer, max_read);
-		kfree(old_buffer);
-
-		read += max_read;
 	}
+
+	int max_read = min(count - read, dev->read_buffer->index);
+
+	char *new_buffer = kmalloc(sizeof(char) * dev->read_buffer->size, GFP_KERNEL);
+	memcpy(new_buffer, dev->read_buffer->buffer + max_read, dev->read_buffer->size - max_read);
+
+	char *old_buffer = dev->read_buffer->buffer;
+	dev->read_buffer->buffer = new_buffer;
+	dev->read_buffer->index -= max_read;
+
+	up(&dev->read_buffer->sem);
+	wake_up_interruptible(&dev->read_buffer->write_wait_queue);
+
+	//TODO error checking
+	copy_to_user(buf, old_buffer, max_read);
+	kfree(old_buffer);
+
+	read += max_read;
 
 	return read; //return number of bytes read
 }
@@ -257,46 +254,42 @@ static ssize_t dm510_write( struct file *filp,
 		return -ERESTARTSYS;
 	}
 
-	while (count > written) // not done writing to buffer
+	// if non-blocking and buffer is full then leave
+	if (dev->write_buffer->index == dev->write_buffer->size)
 	{
-		// if non-blocking and buffer is full then leave
-		if (dev->write_buffer->index == dev->write_buffer->size)
+		up(&dev->write_buffer->sem); // Release the lock
+
+		if (filp->f_flags & O_NONBLOCK)
 		{
-			up(&dev->write_buffer->sem); // Release the lock
-
-			if (filp->f_flags & O_NONBLOCK)
-			{
-				printk(KERN_ALERT "Released the lock due to non-block\n");
-				return -EAGAIN;
-			}
-
-			if (wait_event_interruptible(dev->write_buffer->write_wait_queue, (dev->write_buffer->index < dev->write_buffer->size)))
-			{
-				printk(KERN_ALERT "Got interupted \n");
-				return -ERESTARTSYS; // Restart the system call TODO sure?
-			}
-
-			//printk(KERN_ALERT "trying to get the lock at line 294\n");
-			if (down_interruptible(&dev->write_buffer->sem))
-			{
-				return -ERESTARTSYS;
-			}
+			printk(KERN_ALERT "Released the lock due to non-block\n");
+			return -EAGAIN;
 		}
 
-		int max_write = min(count, dev->write_buffer->size - dev->write_buffer->index);
-
-		int copy_res = copy_from_user(dev->write_buffer->buffer + dev->write_buffer->index, buf, max_write);
-
-		if (copy_res != 0)
+		if (wait_event_interruptible(dev->write_buffer->write_wait_queue, (dev->write_buffer->index < dev->write_buffer->size)))
 		{
-			printk(KERN_ALERT "there was an error: %d", copy_res);
+			printk(KERN_ALERT "Got interupted \n");
+			return -ERESTARTSYS; // Restart the system call TODO sure?
 		}
 
-		// copy_res is the number of chars not copied to user
-		dev->write_buffer->index += max_write - copy_res;
-		written += max_write - copy_res;
+		//printk(KERN_ALERT "trying to get the lock at line 294\n");
+		if (down_interruptible(&dev->write_buffer->sem))
+		{
+			return -ERESTARTSYS;
+		}
 	}
 
+	int max_write = min(count, dev->write_buffer->size - dev->write_buffer->index);
+
+	int copy_res = copy_from_user(dev->write_buffer->buffer + dev->write_buffer->index, buf, max_write);
+
+	if (copy_res != 0)
+	{
+		printk(KERN_ALERT "there was an error: %d", copy_res);
+	}
+
+	// copy_res is the number of chars not copied to user
+	dev->write_buffer->index += max_write - copy_res;
+	written += max_write - copy_res;
 
 	up(&dev->write_buffer->sem); // Release the lock
 	wake_up_interruptible(&dev->write_buffer->read_wait_queue);
