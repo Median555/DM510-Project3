@@ -125,8 +125,8 @@ int dm510_init_module( void ) {
 	devs[1].cdev.ops = &dm510_fops;
 	cdev_add(&devs[1].cdev, devno, 1); //TODO: error checking
 
-	printk(KERN_INFO "DM510: Hello from your device!\n");
-	//printk(KERN_INFO "dev0 %p, cdev %p\n", &devs[0], &devs[0].cdev);
+	printk(KERN_ALERT "DM510: Hello from your device!\n");
+	//printk(KERN_ALERT "dev0 %p, cdev %p\n", &devs[0], &devs[0].cdev);
 	return 0;
 }
 
@@ -150,7 +150,7 @@ void dm510_cleanup_module( void ) {
 
 	//void unregister_chrdev_region(dev_t first, unsigned int count);
 
-	printk(KERN_INFO "DM510: Module unloaded.\n");
+	printk(KERN_ALERT "DM510: Module unloaded.\n");
 }
 
 
@@ -183,69 +183,61 @@ static ssize_t dm510_read( struct file *filp,
     size_t count,   /* The max number of bytes to read  */
     loff_t *f_pos )  /* The offset in the file           */
 {
-
-	//printk(KERN_INFO "now reading \n");
-
-	struct dm510_dev *dev = filp->private_data;
-	//printk(KERN_INFO "dev0 %p, cdev %p\n", dev, &dev->cdev);
-	//printk(KERN_INFO "Message is \"%s\" with length %d\n", dev->read_buffer, dev->size);
-
-	char *old_buffer;
-
-	if (down_interruptible(&dev->read_buffer->sem))
+	if (count < 1)
 	{
-		return -ERESTARTSYS;
+		return -1; //TODO
 	}
 
-	int max_read = min(count, dev->read_buffer->index);
+	int read = 0;
+	struct dm510_dev *dev = filp->private_data;
 
-	while (dev->read_buffer->index == 0) // Buffer is empty
+	while (read < count)
 	{
-		//printk(KERN_INFO "queue not empty \n");
-		up(&dev->read_buffer->sem); // Release the lock
-		//printk(KERN_INFO "Released the lock \n");
-		if (filp->f_flags & O_NONBLOCK)
-		{
-			return -EAGAIN;
-		}
-
-		//printk(KERN_INFO "wait_event_interruptible is being called \n");
-		//printk(KERN_INFO "index is %d \n", dev->read_buffer->index);
-
-		if (wait_event_interruptible(dev->read_buffer->read_wait_queue, (dev->read_buffer->index > 0)))
-		{
-			printk(KERN_INFO "Bad stuff\n");
-			return -ERESTARTSYS; // Restart the system call
-		}
-
-		//printk(KERN_INFO "index is %d \n", dev->read_buffer->index);
-
-		//printk(KERN_INFO "Getting the lock \n");
 		if (down_interruptible(&dev->read_buffer->sem))
 		{
 			return -ERESTARTSYS;
 		}
 
-		//printk(KERN_INFO "while loop to repeat \n");
+		while (dev->read_buffer->index == 0) // Buffer is empty
+		{
+			up(&dev->read_buffer->sem); // Release the lock
+			if (filp->f_flags & O_NONBLOCK)
+			{
+				return -EAGAIN;
+			}
+
+			if (wait_event_interruptible(dev->read_buffer->read_wait_queue, (dev->read_buffer->index > 0)))
+			{
+				printk(KERN_ALERT "Bad stuff\n");
+				return -ERESTARTSYS; // Restart the system call
+			}
+
+			if (down_interruptible(&dev->read_buffer->sem))
+			{
+				return -ERESTARTSYS;
+			}
+		}
+
+		int max_read = min(count - read, dev->read_buffer->index);
+
+		char *new_buffer = kmalloc(sizeof(char) * dev->read_buffer->size, GFP_KERNEL);
+		memcpy(new_buffer, dev->read_buffer->buffer + max_read, dev->read_buffer->size - max_read);
+
+		char *old_buffer = dev->read_buffer->buffer;
+		dev->read_buffer->buffer = new_buffer;
+		dev->read_buffer->index -= max_read;
+
+		up(&dev->read_buffer->sem);
+		wake_up_interruptible(&dev->read_buffer->write_wait_queue);
+
+		//TODO error checking
+		copy_to_user(buf, old_buffer, max_read);
+		kfree(old_buffer);
+
+		read += max_read;
 	}
 
-	char * new_buffer = kmalloc(sizeof(char) * dev->read_buffer->size, GFP_KERNEL);
-	memcpy(new_buffer, dev->read_buffer->buffer + max_read, dev->read_buffer->size - max_read);
-	old_buffer = dev->read_buffer->buffer;
-	dev->read_buffer->buffer = new_buffer;
-	dev->read_buffer->index -= max_read;
-	up(&dev->read_buffer->sem);
-
-	wake_up_interruptible(&dev->read_buffer->write_wait_queue);
-
-	copy_to_user(buf, old_buffer, max_read);
-	kfree(old_buffer);
-
-
-
-	*f_pos += max_read;
-
-	return max_read; //return number of bytes read
+	return read; //return number of bytes read
 }
 
 
@@ -257,57 +249,39 @@ static ssize_t dm510_write( struct file *filp,
 {
 	int written = 0;
 
-	printk(KERN_INFO " -> now writing \n");
-
 	struct dm510_dev *dev = filp->private_data;
 
-	printk(KERN_INFO " -> now getting the lock \n");
+	//printk(KERN_ALERT "trying to get the lock at line 264\n");
 	if (down_interruptible(&dev->write_buffer->sem))
 	{
 		return -ERESTARTSYS;
 	}
 
-	printk(KERN_INFO " -> got ze lock \n");
-
-	while (dev->write_buffer->index == dev->write_buffer->size || count > written) // Buffer is full
+	while (count > written) // not done writing to buffer
 	{
-		printk(KERN_INFO "buffer is full or count less than written\n");
-
-		if (filp->f_flags & O_NONBLOCK)
-		{
-			printk(KERN_INFO "Released the lock \n");
-			up(&dev->write_buffer->sem); // Release the lock
-			return -EAGAIN;
-		}
-
-		printk(KERN_INFO "wait_event_interruptible is being called \n");
-		printk(KERN_INFO "index is %d \n", dev->write_buffer->index);
-
-		if (!(dev->write_buffer->index < dev->write_buffer->size))
+		// if non-blocking and buffer is full then leave
+		if (dev->write_buffer->index == dev->write_buffer->size)
 		{
 			up(&dev->write_buffer->sem); // Release the lock
+
+			if (filp->f_flags & O_NONBLOCK)
+			{
+				printk(KERN_ALERT "Released the lock due to non-block\n");
+				return -EAGAIN;
+			}
+
 			if (wait_event_interruptible(dev->write_buffer->write_wait_queue, (dev->write_buffer->index < dev->write_buffer->size)))
 			{
-				printk(KERN_INFO "Bad stuff\n");
-				return -ERESTARTSYS; // Restart the system call
+				printk(KERN_ALERT "Got interupted \n");
+				return -ERESTARTSYS; // Restart the system call TODO sure?
+			}
+
+			//printk(KERN_ALERT "trying to get the lock at line 294\n");
+			if (down_interruptible(&dev->write_buffer->sem))
+			{
+				return -ERESTARTSYS;
 			}
 		}
-		else
-		{
-			up(&dev->write_buffer->sem); // Release the lock
-		}
-
-		printk(KERN_INFO "index is %d \n", dev->write_buffer->index);
-
-		printk(KERN_INFO "Getting the lock \n");
-
-
-		if (down_interruptible(&dev->write_buffer->sem))
-		{
-			return -ERESTARTSYS;
-		}
-
-		printk(KERN_INFO "lock aquried \n");
 
 		int max_write = min(count, dev->write_buffer->size - dev->write_buffer->index);
 
@@ -315,27 +289,17 @@ static ssize_t dm510_write( struct file *filp,
 
 		if (copy_res != 0)
 		{
-			printk(KERN_INFO "there was an error: %d", copy_res);
+			printk(KERN_ALERT "there was an error: %d", copy_res);
 		}
 
-		printk(KERN_INFO "max_write is: %d \n", max_write);
-
+		// copy_res is the number of chars not copied to user
 		dev->write_buffer->index += max_write - copy_res;
 		written += max_write - copy_res;
-
-		printk(KERN_INFO "written: %d\n", written);
-
-
-		wake_up_interruptible(&dev->write_buffer->read_wait_queue);
-
-		printk(KERN_INFO "while loop to repeat \n");
 	}
 
-	printk(KERN_INFO "about to release the lock! \n");
-	up(&dev->write_buffer->sem); // Release the lock
-	printk(KERN_INFO "released the lock \n");
 
-	printk(KERN_INFO "done writing! \n");
+	up(&dev->write_buffer->sem); // Release the lock
+	wake_up_interruptible(&dev->write_buffer->read_wait_queue);
 
 	return written; //return number of bytes written
 }
@@ -347,7 +311,7 @@ long dm510_ioctl(
     unsigned long arg ) /* argument of the command */
 {
 	/* ioctl code belongs here */
-	//printk(KERN_INFO "DM510: ioctl called.\n");
+	//printk(KERN_ALERT "DM510: ioctl called.\n");
 
 	return 0; //has to be changed
 }

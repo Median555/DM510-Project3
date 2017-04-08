@@ -7,7 +7,6 @@ ROOT = /tmp
 KERNELDIR = ${ROOT}/linux-3.18.48
 PWD = $(shell pwd)
 
-
 obj-m += dm510_dev.o
 
 modules:
