@@ -335,7 +335,7 @@ static ssize_t dm510_write( struct file *filp,
 	}
 
 	// if non-blocking and buffer is full then leave
-	if (dev->write_buffer->index == dev->write_buffer->size)
+	while (dev->write_buffer->index == dev->write_buffer->size)
 	{
 		up(&dev->write_buffer->sem); // Release the lock
 
