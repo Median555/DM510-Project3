@@ -32,9 +32,12 @@ void read_all(int fd, void *buf, int count) {
 }
 
 void write_all(int fd, void *buf, int count) {
+
     while (count > 0) {
+		// printf("count %d\n", count);
         int ret;
         ret = write(fd, buf, count);
+		// printf("written %d\n", ret);
         if (ret == -1) {
             perror("write");
             exit(1);
@@ -42,6 +45,7 @@ void write_all(int fd, void *buf, int count) {
 
         count -= ret;
         buf += ret;
+		// printf("%d %d\n", count, buf);
     }
 }
 
@@ -59,7 +63,6 @@ int main(int argc, char *argv[])
         fd = open("/dev/dm510-0", O_RDWR);
 		perror("w open");
         for (i=0; i<ITS; i++) {
-			//printf("c %d\n", i);
             val++;
             sum += val;
             cnt = 4;
@@ -91,6 +94,7 @@ int main(int argc, char *argv[])
             val++;
             sum += val;
             write_all(fd, &val, 4);
+			// printf("%d\n", i);
         }
         printf("2. expected result: %d\n", sum);
         wait(NULL);

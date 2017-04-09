@@ -14,10 +14,9 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/wait.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/semaphore.h>
 #include <linux/cdev.h>
-/* #include <asm/system.h> */
 #include <asm/switch_to.h>
 #include <linux/wait.h>
 
@@ -87,42 +86,86 @@ void free_buffers(void)
 {
 	kfree(buffer1->buffer);
 	kfree(buffer2->buffer);
+
+	kfree(buffer1);
+	kfree(buffer2);
 }
 
-void setup_buffers(void)
+int setup_buffers(void)
 {
 	buffer1 = (struct dm510_buffer *) kmalloc(sizeof(struct dm510_buffer), GFP_KERNEL);
+	if (!buffer1) // Allocation failed
+	{
+		return -ENOMEM;
+	}
+
 	buffer1->buffer = (char *) kmalloc(sizeof(char) * BUFFER_SIZE, GFP_KERNEL);
+	if (!buffer1->buffer) // Allocation failed
+	{
+		kfree(buffer1);
+		return -ENOMEM;
+	}
 	buffer1->size = BUFFER_SIZE;
 	buffer1->index = 0;
+	buffer1->no_readers = 0;
+	buffer1->no_writers = 0;
+
 	init_MUTEX(&buffer1->sem);
 	init_waitqueue_head(&buffer1->read_wait_queue);
 	init_waitqueue_head(&buffer1->write_wait_queue);
 
+
 	buffer2 = (struct dm510_buffer *) kmalloc(sizeof(struct dm510_buffer), GFP_KERNEL);
+	if (!buffer2) // Allocation failed
+	{
+		kfree(buffer1->buffer);
+		kfree(buffer1);
+		return -ENOMEM;
+	}
 	buffer2->buffer = (char *) kmalloc(sizeof(char) * BUFFER_SIZE, GFP_KERNEL);
+	if (!buffer2->buffer) // Allocation failed
+	{
+		kfree(buffer1->buffer);
+		kfree(buffer1);
+		kfree(buffer2);
+		return -ENOMEM;
+	}
 	buffer2->size = BUFFER_SIZE;
 	buffer2->index = 0;
+	buffer2->no_readers = 0;
+	buffer2->no_writers = 0;
+
 	init_MUTEX(&buffer2->sem);
 	init_waitqueue_head(&buffer2->read_wait_queue);
 	init_waitqueue_head(&buffer2->write_wait_queue);
+
+	return 0;
 }
 
 /* called when module is loaded */
-int dm510_init_module( void ) {
-
-	setup_buffers();
-	/* initialization code belongs here */
+int dm510_init_module( void )
+{
+	int setup = setup_buffers();
+	if(setup < 0)
+	{
+		return setup;
+	}
 
 	devs = (struct dm510_dev*)kmalloc(2 * sizeof(struct dm510_dev), GFP_KERNEL);
-
-	/* kmalloc buffers */
+	if (!devs) // Allocation failed
+	{
+		return -ENOMEM;
+	}
 
 	int devno = MKDEV(MAJOR_NUMBER, MIN_MINOR_NUMBER);
-	//printk("devno: %d\n", devno);
 
-	printk("%d\n", register_chrdev_region(devno, 1, "dm510-0"));
-
+	int register_result = register_chrdev_region(devno, 1, "dm510-0");
+	if (register_result < 0) // register failed
+	{
+		free_buffers();
+		kfree(devs);
+		return -EPERM;
+	}
 
 	devs[0].read_buffer = buffer1;
 	devs[0].write_buffer = buffer2;
@@ -130,12 +173,28 @@ int dm510_init_module( void ) {
 	cdev_init(&devs[0].cdev, &dm510_fops);
 	devs[0].cdev.owner = THIS_MODULE;
 	devs[0].cdev.ops = &dm510_fops;
-	cdev_add(&devs[0].cdev, devno, 1); //TODO: error checking
+
+	int add_result = cdev_add(&devs[0].cdev, devno, 1); //TODO: error checking
+	if (add_result < 0)
+	{
+		free_buffers();
+		kfree(devs);
+		unregister_chrdev_region(devs[0].cdev.dev, 1);
+
+		return -EPERM;
+	}
 
 	devno = MKDEV(MAJOR_NUMBER, MAX_MINOR_NUMBER);
-	//printk("devno: %d\n", devno);
 
-	printk("%d\n", register_chrdev_region(devno, 1, "dm510-1")); //TODO: is this registerd right??? check scull
+	register_result = register_chrdev_region(devno, 1, "dm510-1");
+	if (register_result < 0) // register failed
+	{
+		free_buffers();
+		kfree(devs);
+		unregister_chrdev_region(devs[0].cdev.dev, 1);
+		cdev_del(&devs[0].cdev);
+		return -EPERM;
+	}
 
 	devs[1].read_buffer = buffer2;
 	devs[1].write_buffer = buffer1;
@@ -143,21 +202,25 @@ int dm510_init_module( void ) {
 	cdev_init(&devs[1].cdev, &dm510_fops);
 	devs[1].cdev.owner = THIS_MODULE;
 	devs[1].cdev.ops = &dm510_fops;
-	cdev_add(&devs[1].cdev, devno, 1); //TODO: error checking
+	add_result = cdev_add(&devs[1].cdev, devno, 1);
+	if (add_result < 0)
+	{
+		free_buffers();
+		kfree(devs);
+		unregister_chrdev_region(devs[0].cdev.dev, 1);
+		cdev_del(&devs[0].cdev);
+		unregister_chrdev_region(devs[1].cdev.dev, 1);
+		return -EPERM;
+	}
 
-	printk(KERN_ALERT "DM510: Hello from your device!\n");
-	//printk(KERN_ALERT "dev0 %p, cdev %p\n", &devs[0], &devs[0].cdev);
 	return 0;
 }
 
 /* Called when module is unloaded */
-void dm510_cleanup_module( void ) {
-
-	/* kfree buffers */
+void dm510_cleanup_module( void )
+{
+	// Free the buffers
 	free_buffers();
-
-	kfree(buffer1);
-	kfree(buffer2);
 
 	unregister_chrdev_region(devs[0].cdev.dev, 1);
 	cdev_del(&devs[0].cdev);
@@ -165,82 +228,84 @@ void dm510_cleanup_module( void ) {
 	unregister_chrdev_region(devs[1].cdev.dev, 1);
 	cdev_del(&devs[1].cdev);
 
-	/* clean up code belongs here */
-
-	//void unregister_chrdev_region(dev_t first, unsigned int count);
-
-	printk(KERN_ALERT "DM510: Module unloaded.\n");
+	// De-allocate the our device structs
+	kfree(devs);
 }
 
-// is leaving must be called with 1 or -1 TODO: fix this function or don't use it (in the case of decrementing)
-int set_readers_and_writers(struct inode *inode, struct file *filp, int is_leaving)
+// sets the number of readers and writers, accroding to diff
+int set_readers_and_writers(struct inode *inode, struct file *filp, int diff)
 {
 	struct dm510_dev *dev;
 	dev = container_of(inode->i_cdev, struct dm510_dev, cdev);
 	filp->private_data = dev;
 
-	if (filp->f_mode & O_RDWR)
+	if (filp->f_mode & (FMODE_READ | FMODE_WRITE))
 	{
-		printk(KERN_ALERT "Opened for both reading and writing\n");
 		if (down_interruptible(&dev->read_buffer->sem))
 		{
 			return -ERESTARTSYS;
 		}
 
-		if (down_interruptible(&dev->write_buffer->sem))
+		if (down_trylock(&dev->write_buffer->sem))
 		{
 			up(&dev->read_buffer->sem);
 			return -ERESTARTSYS;
 		}
 
-		if (dev->read_buffer->no_readers < NO_READERS && dev->write_buffer->no_writers < NO_WRITERS)
+		// Deny access if already at max readers or max writers
+		if (dev->read_buffer->no_readers + diff > NO_READERS ||
+			dev->write_buffer->no_writers + diff > NO_WRITERS)
 		{
-			dev->read_buffer->no_readers += is_leaving;
-			dev->write_buffer->no_writers += is_leaving;
-		}
-
-		up(&dev->read_buffer->sem);
-		up(&dev->write_buffer->sem);
-
-
-	}
-	else if (filp->f_mode & FMODE_READ)
-	{
-		printk(KERN_ALERT "Opened for reading\n");
-		if (down_interruptible(&dev->read_buffer->sem))
-		{
-			return -ERESTARTSYS;
-		}
-
-		if (dev->read_buffer->no_readers < NO_READERS)
-		{
-			dev->read_buffer->no_readers += is_leaving;
 			up(&dev->read_buffer->sem);
+			up(&dev->write_buffer->sem);
+
+			return -EAGAIN;
 		}
 		else
 		{
+			dev->read_buffer->no_readers += diff;
+			dev->write_buffer->no_writers += diff;
+
 			up(&dev->read_buffer->sem);
-			// TODO: check errorcode
-			return -1;
+			up(&dev->write_buffer->sem);
+		}
+	}
+	else if (filp->f_mode & FMODE_READ)
+	{
+		if (down_interruptible(&dev->read_buffer->sem))
+		{
+			return -ERESTARTSYS;
+		}
+
+		// Deny access if already at max readers
+		if (dev->read_buffer->no_readers + diff > NO_READERS)
+		{
+			up(&dev->read_buffer->sem);
+
+			return -EAGAIN;
+		}
+		else
+		{
 		}
 	}
 	else if (filp->f_mode & FMODE_WRITE)
 	{
-		printk(KERN_ALERT "Opened for writing\n");
 		if (down_interruptible(&dev->write_buffer->sem))
 		{
 			return -ERESTARTSYS;
 		}
-		if (dev->write_buffer->no_writers < NO_WRITERS)
+
+		// Deny access if already at max writers
+		if (dev->write_buffer->no_writers + diff > NO_WRITERS)
 		{
-			dev->write_buffer->no_writers += is_leaving;
 			up(&dev->write_buffer->sem);
+
+			return -EAGAIN;
 		}
 		else
 		{
+			dev->write_buffer->no_writers += diff;
 			up(&dev->write_buffer->sem);
-			// TODO: check errorcode
-			return -1;
 		}
 	}
 
@@ -268,7 +333,7 @@ static ssize_t dm510_read( struct file *filp,
 {
 	if (count < 1)
 	{
-		return -1; //TODO
+		return -EPERM;
 	}
 
 	struct dm510_dev *dev = filp->private_data;
@@ -288,7 +353,6 @@ static ssize_t dm510_read( struct file *filp,
 
 		if (wait_event_interruptible(dev->read_buffer->read_wait_queue, (dev->read_buffer->index > 0)))
 		{
-			printk(KERN_ALERT "Bad stuff\n");
 			return -ERESTARTSYS; // Restart the system call
 		}
 
@@ -300,6 +364,13 @@ static ssize_t dm510_read( struct file *filp,
 
 	int max_read = min(count, dev->read_buffer->index);
 
+	// Access check, read from buffer
+	if (!access_ok(VERIFY_WRITE, buf, max_read))
+	{
+		up(&dev->read_buffer->sem);
+		return -EACCES;
+	}
+
 	char *new_buffer = kmalloc(sizeof(char) * dev->read_buffer->size, GFP_KERNEL);
 	memcpy(new_buffer, dev->read_buffer->buffer + max_read, dev->read_buffer->size - max_read);
 
@@ -309,8 +380,6 @@ static ssize_t dm510_read( struct file *filp,
 
 	up(&dev->read_buffer->sem);
 	wake_up_interruptible(&dev->read_buffer->write_wait_queue);
-
-	//TODO error checking
 
 	int copy_res = copy_to_user(buf, old_buffer, max_read);
 
@@ -326,7 +395,10 @@ static ssize_t dm510_write( struct file *filp,
     size_t count,   /* The max number of bytes to write */
     loff_t *f_pos )  /* The offset in the file           */
 {
-
+	if (count < 1)
+	{
+		return -EPERM;
+	}
 	struct dm510_dev *dev = filp->private_data;
 
 	if (down_interruptible(&dev->write_buffer->sem))
@@ -341,14 +413,13 @@ static ssize_t dm510_write( struct file *filp,
 
 		if (filp->f_flags & O_NONBLOCK)
 		{
-			printk(KERN_ALERT "Released the lock due to non-block\n");
+			// Cancel operation if non-blocking
 			return -EAGAIN;
 		}
 
 		if (wait_event_interruptible(dev->write_buffer->write_wait_queue, (dev->write_buffer->index < dev->write_buffer->size)))
 		{
-			printk(KERN_ALERT "Got interupted \n");
-			return -ERESTARTSYS; // Restart the system call TODO sure?
+			return -ERESTARTSYS;
 		}
 
 		if (down_interruptible(&dev->write_buffer->sem))
@@ -359,8 +430,14 @@ static ssize_t dm510_write( struct file *filp,
 
 	int max_write = min(count, dev->write_buffer->size - dev->write_buffer->index);
 
-	int copy_res = copy_from_user(dev->write_buffer->buffer + dev->write_buffer->index, buf, max_write);
+	// Access check, read from buffer
+	if (!access_ok(VERIFY_READ, buf, max_write))
+	{
+		up(&dev->write_buffer->sem);
+		return -EACCES;
+	}
 
+	int copy_res = copy_from_user(dev->write_buffer->buffer + dev->write_buffer->index, buf, max_write);
 
 	// copy_res is the number of chars not copied to user
 	dev->write_buffer->index += max_write - copy_res;
@@ -384,11 +461,19 @@ long dm510_ioctl(
 	switch(cmd)
 	{
 		case DM510_IOCBUFSIZE:
+			if (arg < 1)
+			{
+				return -EPERM;
+			}
 			BUFFER_SIZE = arg;
 			free_buffers();
 			setup_buffers();
 			break;
 		case DM510_IOCNOREADERS:
+			if (arg < 1)
+			{
+				return -EPERM;
+			}
 			NO_READERS = arg;
 			break;
 		default:
