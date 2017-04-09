@@ -286,6 +286,8 @@ int set_readers_and_writers(struct inode *inode, struct file *filp, int diff)
 		}
 		else
 		{
+			dev->read_buffer->no_readers += diff;
+			up(&dev->read_buffer->sem);
 		}
 	}
 	else if (filp->f_mode & FMODE_WRITE)
