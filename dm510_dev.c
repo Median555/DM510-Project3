@@ -107,8 +107,6 @@ int setup_buffers(void)
 	}
 	buffer1->size = BUFFER_SIZE;
 	buffer1->index = 0;
-	buffer1->no_readers = 0;
-	buffer1->no_writers = 0;
 
 	init_MUTEX(&buffer1->sem);
 	init_waitqueue_head(&buffer1->read_wait_queue);
@@ -132,8 +130,6 @@ int setup_buffers(void)
 	}
 	buffer2->size = BUFFER_SIZE;
 	buffer2->index = 0;
-	buffer2->no_readers = 0;
-	buffer2->no_writers = 0;
 
 	init_MUTEX(&buffer2->sem);
 	init_waitqueue_head(&buffer2->read_wait_queue);
@@ -150,6 +146,10 @@ int dm510_init_module( void )
 	{
 		return setup;
 	}
+	buffer1->no_readers = 0;
+	buffer1->no_writers = 0;
+	buffer2->no_readers = 0;
+	buffer2->no_writers = 0;
 
 	devs = (struct dm510_dev*)kmalloc(2 * sizeof(struct dm510_dev), GFP_KERNEL);
 	if (!devs) // Allocation failed
