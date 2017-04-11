@@ -14,11 +14,13 @@ int main(int argc, char *argv[])
 	// int no_readers = 10;
 	// printf("set readers result: %d\n", ioctl(fd, 28674, no_readers));
 	// // close(fd);
+	emptyBuffers();
 	testNoWriters();
 	testNoReaders();
 	readZero();
 	writeZero();
 	writeWhenFull();
+	emptyBuffers();
 	return 0;
 }
 
@@ -158,4 +160,25 @@ writeWhenFull()
 	{
 		printf("%-20s -> fail\n","write when full");
 	}
+}
+
+emptyBuffers()
+{
+	int fd = open("/dev/dm510-0", O_RDWR | O_NONBLOCK);
+	char *buf;
+	int count = 10;
+	int result = 0;
+	while (result >= 0)
+	{
+		result = read(fd, buf, count);
+	}
+	close(fd);
+
+	fd = open("/dev/dm510-1", O_RDWR | O_NONBLOCK);
+	result = 0;
+	while (result >= 0)
+	{
+		result = read(fd, buf, count);
+	}
+	close(fd);
 }
