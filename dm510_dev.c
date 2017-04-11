@@ -239,7 +239,7 @@ int set_readers_and_writers(struct inode *inode, struct file *filp, int diff)
 	dev = container_of(inode->i_cdev, struct dm510_dev, cdev);
 	filp->private_data = dev;
 
-	if (filp->f_mode & (FMODE_READ | FMODE_WRITE))
+	if (filp->f_mode & FMODE_READ && filp->f_mode & FMODE_WRITE)
 	{
 		if (down_interruptible(&dev->read_buffer->sem))
 		{
