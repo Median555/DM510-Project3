@@ -15,7 +15,7 @@ void testNoWriters()
 	int fileDescriptors[no_writers];
 	for (i = 0; i < (no_writers + extra_writers); i++)
 	{
-		fileDescriptors[i] = open("/dev/dm510-0", O_WRONLY); //TODO:flag is wrong
+		fileDescriptors[i] = open("/dev/dm510-0", O_WRONLY);
 		if (fileDescriptors[i] >= 0)
 		{
 			no_opend++;
@@ -124,7 +124,7 @@ void writeWhenFull()
 	int i;
 	int fd = open("/dev/dm510-0", O_RDWR);
 	int buffer_size = 10;
-	ioctl(fd, 28673, buffer_size);
+	ioctl(fd, 28673, buffer_size); // Set the size of the buffers
 	close(fd);
 
 	int fd2 = open("/dev/dm510-0", O_RDWR | O_NONBLOCK);
